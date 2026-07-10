@@ -142,47 +142,61 @@ private class EpgXmlRepository(
     private suspend fun fetchXml(): String {
         log.i("获取节目单xml: $url")
 
-        // 1. 绕过 HTTPS 证书校验（改为更兼容老电视的 TLS）
+        // 1. 绕过老电视的 HTTPS 证书校验
         val trustAllCerts = arrayOf<javax.net.ssl.TrustManager>(object : javax.net.ssl.X509TrustManager {
             override fun checkClientTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
             override fun checkServerTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
             override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
         })
-        val sslContext = javax.net.ssl.SSLContext.getInstance("TLS") 
+        val sslContext = javax.net.ssl.SSLContext.getInstance("TLS")
         sslContext.init(null, trustAllCerts, java.security.SecureRandom())
 
-        // 2. 构建终极霸体版 OkHttpClient (修复 GZIP 冲突)
+        // 2. 构建客户端，不再折腾 Interceptor，全权交给 OkHttp 的默认重定向机制
         val client = okhttp3.OkHttpClient.Builder()
             .sslSocketFactory(sslContext.socketFactory, trustAllCerts[0] as javax.net.ssl.X509TrustManager)
-            .hostnameVerifier { _, _ -> true } 
-            .followRedirects(true)             
-            .followSslRedirects(true)          
-            // 改回普通的 Interceptor，只伪装 UA，不干涉 GZIP 压缩
-            .addInterceptor { chain ->
-                val req = chain.request().newBuilder()
-                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-                    .build()
-                chain.proceed(req)
-            }
+            .hostnameVerifier { _, _ -> true }
+            .followRedirects(true)
+            .followSslRedirects(true)
             .build()
 
-        // 3. 构建初始请求（Header 已经在拦截器里加了，这里不需要写了）
-        val request = okhttp3.Request.Builder().url(url).build()
+        // 3. 构建请求，直接把 UA 拍在脸上
+        val request = okhttp3.Request.Builder()
+            .url(url)
+            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+            .build()
 
         try {
-            // 4. 放弃作者自定义的 await()，直接在 IO 线程同步执行，规避协程超时 BUG
             return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                val response = client.newCall(request).execute() // 原生的同步执行
-                
+                val response = client.newCall(request).execute()
+
                 if (!response.isSuccessful) throw Exception("HTTP ${response.code}: ${response.message}")
 
-                val fetcher = top.yogiczy.mytv.core.data.repositories.epg.fetcher.EpgFetcher.instances.first { it.isSupport(url) }
-                fetcher.fetch(response)
+                val bytes = response.body?.bytes() ?: throw Exception("服务器响应为空")
+
+                // 4. 终极接管解析：通过 GZIP 的“魔法数字(Magic Number)”智能判断数据格式
+                val isGzip = bytes.size >= 2 && bytes[0] == 0x1F.toByte() && bytes[1] == 0x8B.toByte()
+                
+                val xmlString = if (isGzip) {
+                    // 如果真的是 GZIP，手动解压
+                    java.util.zip.GZIPInputStream(java.io.ByteArrayInputStream(bytes)).bufferedReader().use { it.readText() }
+                } else {
+                    // 如果已经被 OkHttp 自动解压，或者根本就是纯文本，直接转字符串
+                    String(bytes)
+                }
+
+                // 5. 防忽悠机制：如果服务器返回了 HTML 网页(通常是被拦截了)
+                if (xmlString.trimStart().startsWith("<html", ignoreCase = true)) {
+                    // 把网页里的标签去掉，提取出真正的错误提示
+                    val errMsg = xmlString.replace(Regex("<.*?>"), "").replace(Regex("\\s+"), " ").take(30)
+                    throw Exception("被防火墙拦截，服务器返回了网页: $errMsg")
+                }
+
+                // 正常返回 XML 数据，彻底绕过原作者的坑爹 Fetcher
+                xmlString
             }
         } catch (ex: Exception) {
-            // 顺手把异常的真实 message 抛到 UI 上，方便如果再报错能看出究竟是什么问题
-            log.e("获取节目单xml失败: ${ex.message}", ex)
-            throw Exception("获取节目单xml失败: ${ex.message}", ex)
+            log.e("获取节目单失败: ${ex.message}", ex)
+            throw Exception("${ex.message}", ex)
         }
     }
 
