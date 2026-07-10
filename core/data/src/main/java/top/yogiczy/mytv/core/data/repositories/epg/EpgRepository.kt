@@ -143,7 +143,11 @@ private class EpgXmlRepository(
         log.i("获取节目单xml: $url")
 
         val client = OkHttpClient()
-        val request = Request.Builder().url(url).build()
+        val request = Request.Builder()
+            .url(url)
+            // ⬇️ 注入伪装的 PC 浏览器 User-Agent ⬇️
+            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+            .build()
 
         try {
             val response = client.newCall(request).await()
