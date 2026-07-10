@@ -151,17 +151,16 @@ private class EpgXmlRepository(
         val sslContext = javax.net.ssl.SSLContext.getInstance("TLS") 
         sslContext.init(null, trustAllCerts, java.security.SecureRandom())
 
-        // 2. 构建终极霸体版 OkHttpClient
+        // 2. 构建终极霸体版 OkHttpClient (修复 GZIP 冲突)
         val client = okhttp3.OkHttpClient.Builder()
             .sslSocketFactory(sslContext.socketFactory, trustAllCerts[0] as javax.net.ssl.X509TrustManager)
             .hostnameVerifier { _, _ -> true } 
             .followRedirects(true)             
             .followSslRedirects(true)          
-            // 核心修复点：使用 NetworkInterceptor 拦截底层每一次请求（包含 302 跳转后的请求）
-            .addNetworkInterceptor { chain ->
+            // 改回普通的 Interceptor，只伪装 UA，不干涉 GZIP 压缩
+            .addInterceptor { chain ->
                 val req = chain.request().newBuilder()
                     .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-                    .header("Accept-Encoding", "identity") // 依然阻止自动解压
                     .build()
                 chain.proceed(req)
             }
