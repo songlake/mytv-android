@@ -16,25 +16,23 @@ jobs:
         with:
           distribution: "zulu"
           java-version: "17"
-          cache: "gradle" # 开启缓存，加速编译
+          cache: "gradle"
 
-      - name: 3. 自动生成临时签名文件
-        # 创建 app 目录以防万一，并将 jks 放在默认位置
+      - name: 3. 自动生成临时签名文件 (修复路径版)
+        # 去掉了 app/ 前缀，直接在项目根目录生成 keystore.jks，以匹配 next 分支的要求
         run: |
-          mkdir -p app
-          keytool -genkey -v -keystore app/keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -alias myalias -storepass mypassword -keypass mypassword -dname "CN=MyTV, OU=MyTV, O=MyTV, L=Unknown, ST=Unknown, C=Unknown"
+          keytool -genkey -v -keystore keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -alias myalias -storepass mypassword -keypass mypassword -dname "CN=MyTV, OU=MyTV, O=MyTV, L=Unknown, ST=Unknown, C=Unknown"
 
       - name: 4. 生成 Release APK
-        # 核心编译命令，Gradle 会自动处理 core/data 等多模块架构
         run: chmod +x ./gradlew && ./gradlew assembleRelease
         env:
           KEYSTORE_PASSWORD: mypassword
           KEY_ALIAS: myalias
           KEY_PASSWORD: mypassword
 
-      - name: 5. 动态提取并重命名应用包 (多模块架构适配)
+      - name: 5. 动态提取并重命名应用包
         run: |
-          # 全局搜索寻找生成的 release.apk，避免由于模块重构导致路径或名字找不到
+          # 自动寻找多模块下的 apk (比如 mobile/build/outputs/apk/release/*.apk)
           APK_PATH=$(find . -path "*/build/outputs/apk/release/*.apk" | head -n 1)
           if [ -n "$APK_PATH" ]; then
             echo "成功找到 APK 文件: $APK_PATH"
