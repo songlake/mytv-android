@@ -22,11 +22,15 @@ jobs:
         run: |
           keytool -genkey -v -keystore keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -alias myalias -storepass mypassword -keypass mypassword -dname "CN=MyTV, OU=MyTV, O=MyTV, L=Unknown, ST=Unknown, C=Unknown"
 
-      - name: 4. 强行修复原作者的编译 Bug (高阶魔法)
-        # 运行 Linux sed 命令，找到报错的那行代码并直接删除，强制让编译器闭嘴
+      - name: 4. 强行修复 Bug 与降级内核 (高阶魔法)
         run: |
+          # 1. 强删导致编译报错的新版实验性代码
           sed -i '/skipMultipleFramesOnSameVsync/d' tv/src/main/java/top/yogiczy/mytv/tv/ui/screens/videoplayer/player/Media3VideoPlayer.kt
-
+          
+          # 2. 动态替换 TOML 配置文件，将 media3 强制降级为 1.3.1 (同时兼容匹配 1.4.0 和 1.5.0)
+          sed -i 's/media3 = "1.4.0"/media3 = "1.3.1"/g' gradle/libs.versions.toml
+          sed -i 's/media3 = "1.5.0"/media3 = "1.3.1"/g' gradle/libs.versions.toml
+ 
       - name: 5. 仅编译 TV 端 APK
         run: chmod +x ./gradlew && ./gradlew :tv:assembleRelease
         env:
