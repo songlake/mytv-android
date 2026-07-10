@@ -142,42 +142,48 @@ private class EpgXmlRepository(
     private suspend fun fetchXml(): String {
         log.i("获取节目单xml: $url")
 
-        // 1. 绕过 HTTPS 证书校验（专治老旧 Android 电视）
+        // 1. 绕过 HTTPS 证书校验（改为更兼容老电视的 TLS）
         val trustAllCerts = arrayOf<javax.net.ssl.TrustManager>(object : javax.net.ssl.X509TrustManager {
             override fun checkClientTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
             override fun checkServerTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
             override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
         })
-        val sslContext = javax.net.ssl.SSLContext.getInstance("SSL")
+        val sslContext = javax.net.ssl.SSLContext.getInstance("TLS") 
         sslContext.init(null, trustAllCerts, java.security.SecureRandom())
 
-        // 2. 构建霸体版 OkHttpClient
+        // 2. 构建终极霸体版 OkHttpClient
         val client = okhttp3.OkHttpClient.Builder()
             .sslSocketFactory(sslContext.socketFactory, trustAllCerts[0] as javax.net.ssl.X509TrustManager)
-            .hostnameVerifier { _, _ -> true } // 允许所有域名
-            .followRedirects(true)             // 允许普通跳转
-            .followSslRedirects(true)          // 允许 HTTP 转 HTTPS
+            .hostnameVerifier { _, _ -> true } 
+            .followRedirects(true)             
+            .followSslRedirects(true)          
+            // 核心修复点：使用 NetworkInterceptor 拦截底层每一次请求（包含 302 跳转后的请求）
+            .addNetworkInterceptor { chain ->
+                val req = chain.request().newBuilder()
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+                    .header("Accept-Encoding", "identity") // 依然阻止自动解压
+                    .build()
+                chain.proceed(req)
+            }
             .build()
 
-        // 3. 构建请求（带上 UA，并拒绝 OkHttp 自动解压）
-        val request = okhttp3.Request.Builder()
-            .url(url)
-            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-            .header("Accept-Encoding", "identity") // 核心：告诉服务器我只要原始包，不要你多管闲事帮我解压
-            .build()
+        // 3. 构建初始请求（Header 已经在拦截器里加了，这里不需要写了）
+        val request = okhttp3.Request.Builder().url(url).build()
 
         try {
-            val response = client.newCall(request).await()
+            // 4. 放弃作者自定义的 await()，直接在 IO 线程同步执行，规避协程超时 BUG
+            return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val response = client.newCall(request).execute() // 原生的同步执行
+                
+                if (!response.isSuccessful) throw Exception("HTTP ${response.code}: ${response.message}")
 
-            if (!response.isSuccessful) throw Exception("${response.code}: ${response.message}")
-
-            val fetcher = EpgFetcher.instances.first { it.isSupport(url) }
-            return withContext(Dispatchers.IO) {
+                val fetcher = top.yogiczy.mytv.core.data.repositories.epg.fetcher.EpgFetcher.instances.first { it.isSupport(url) }
                 fetcher.fetch(response)
             }
         } catch (ex: Exception) {
-            log.e("获取节目单xml失败", ex)
-            throw Exception("获取节目单xml失败，请检查网络连接", ex)
+            // 顺手把异常的真实 message 抛到 UI 上，方便如果再报错能看出究竟是什么问题
+            log.e("获取节目单xml失败: ${ex.message}", ex)
+            throw Exception("获取节目单xml失败: ${ex.message}", ex)
         }
     }
 
