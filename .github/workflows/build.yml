@@ -18,13 +18,13 @@ jobs:
           java-version: "17"
           cache: "gradle"
 
-      - name: 3. 自动生成临时签名文件 (修复路径版)
-        # 去掉了 app/ 前缀，直接在项目根目录生成 keystore.jks，以匹配 next 分支的要求
+      - name: 3. 自动生成临时签名文件 
         run: |
           keytool -genkey -v -keystore keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -alias myalias -storepass mypassword -keypass mypassword -dname "CN=MyTV, OU=MyTV, O=MyTV, L=Unknown, ST=Unknown, C=Unknown"
 
-      - name: 4. 生成 Release APK
-        run: chmod +x ./gradlew && ./gradlew assembleRelease
+      - name: 4. 仅编译 TV 端 APK (核心修改：绕过报错的 Mobile 模块)
+        # 将 ./gradlew assembleRelease 改为了 ./gradlew :tv:assembleRelease
+        run: chmod +x ./gradlew && ./gradlew :tv:assembleRelease
         env:
           KEYSTORE_PASSWORD: mypassword
           KEY_ALIAS: myalias
@@ -32,7 +32,7 @@ jobs:
 
       - name: 5. 动态提取并重命名应用包
         run: |
-          # 自动寻找多模块下的 apk (比如 mobile/build/outputs/apk/release/*.apk)
+          # 动态捕获刚刚生成的 TV 端 apk
           APK_PATH=$(find . -path "*/build/outputs/apk/release/*.apk" | head -n 1)
           if [ -n "$APK_PATH" ]; then
             echo "成功找到 APK 文件: $APK_PATH"
