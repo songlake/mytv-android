@@ -24,8 +24,12 @@ class VideoPlayerState(
     private val instance: VideoPlayer,
     private var defaultDisplayModeProvider: () -> VideoPlayerDisplayMode = { VideoPlayerDisplayMode.ORIGINAL },
 ) {
-    /** 临时在内存中记录最后一次成功准备的直播流 URL，用于前后生命周期重建恢复 */
+    /** 临时在内存中记录最后一次成功准备的直播流 URL */
     var lastPreparedUrl: String? = null
+        private set
+
+    /** 播放器是否已经被销毁（释放） */
+    var isReleased = false
         private set
 
     /** 显示模式 */
@@ -53,33 +57,34 @@ class VideoPlayerState(
     var metadata by mutableStateOf(VideoPlayer.Metadata())
 
     fun prepare(url: String) {
+        if (isReleased) return
         error = null
-        lastPreparedUrl = url // 拦截并记录当前的播放地址
+        lastPreparedUrl = url
         instance.prepare(url)
     }
 
     fun play() {
-        instance.play()
+        if (!isReleased) instance.play()
     }
 
     fun pause() {
-        instance.pause()
+        if (!isReleased) instance.pause()
     }
 
     fun seekTo(position: Long) {
-        instance.seekTo(position)
+        if (!isReleased) instance.seekTo(position)
     }
 
     fun stop() {
-        instance.stop()
+        if (!isReleased) instance.stop()
     }
 
     fun setVideoSurfaceView(surfaceView: SurfaceView) {
-        instance.setVideoSurfaceView(surfaceView)
+        if (!isReleased) instance.setVideoSurfaceView(surfaceView)
     }
 
     fun setVideoTextureView(textureView: TextureView) {
-        instance.setVideoTextureView(textureView)
+        if (!isReleased) instance.setVideoTextureView(textureView)
     }
 
     private val onReadyListeners = mutableListOf<() -> Unit>()
@@ -99,6 +104,7 @@ class VideoPlayerState(
     }
 
     fun initialize() {
+        if (isReleased) return
         instance.initialize()
         instance.onResolution { width, height ->
             if (width > 0 && height > 0) aspectRatio = width.toFloat() / height
@@ -125,8 +131,12 @@ class VideoPlayerState(
     }
 
     fun release() {
+        // 防止重复释放引发底层 C++ 崩溃
+        if (isReleased) return
+        isReleased = true
         onReadyListeners.clear()
         onErrorListeners.clear()
+        onInterruptListeners.clear()
         instance.release()
     }
 }
@@ -141,40 +151,53 @@ fun rememberVideoPlayerState(
     
     // 用于在后台释放时，临时记住需要恢复的直播流 URL
     var savedUrl by remember { mutableStateOf<String?>(null) }
+    
+    // 触发重建播放器的“钥匙”。Key改变时，Compose 会自动丢弃旧 State，创建新 State
+    var playerRecreateKey by remember { mutableStateOf(0) }
 
-    val state = remember {
+    // 使用 playerRecreateKey 作为 remember 的 key
+    val state = remember(playerRecreateKey) {
         VideoPlayerState(
             Media3VideoPlayer(context, coroutineScope),
             defaultDisplayModeProvider,
         )
     }
 
-    DisposableEffect(Unit) {
+    // 当 state 重新创建时，自动初始化
+    DisposableEffect(playerRecreateKey) {
         state.initialize()
-        onDispose { state.release() }
+        
+        // 如果是从后台切回来（savedUrl 有值），自动装填并播放
+        if (!savedUrl.isNullOrEmpty()) {
+            state.prepare(savedUrl!!)
+            state.play()
+            savedUrl = null // 恢复后清空
+        }
+        
+        // 当组件卸载或 playerRecreateKey 变化时，释放当前实例
+        onDispose { 
+            state.release() 
+        }
     }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_RESUME -> {
-                    // 【Power On 唤醒 / 从后台切换回前台】
-                    if (savedUrl != null) {
-                        state.initialize()
-                        state.prepare(savedUrl!!)
-                        state.play()
-                        savedUrl = null // 成功恢复后清除缓存
-                    } else {
-                        state.play()
+                    // 【Power On / 回到前台】
+                    // 仅当当前播放器已经是死亡状态（被 release 过了），才增加 Key 触发“转生”
+                    // 这样可以避免 App 首次冷启动时无意义的重复创建
+                    if (state.isReleased) {
+                        playerRecreateKey++
                     }
                 }
                 Lifecycle.Event.ON_STOP -> {
-                    // 【Power Off 息屏 / 按 Home 键切到后台】
-                    // 1. 如果当前正在播放或者已经有准备好的流，将其记录到 savedUrl 中
+                    // 【Power Off / 切到后台】
+                    // 1. 记下最后的直播地址
                     if (!state.lastPreparedUrl.isNullOrEmpty()) {
                         savedUrl = state.lastPreparedUrl
                     }
-                    // 2. 彻底释放底层播放器、切断网络下载链接、归还系统硬件解码器
+                    // 2. 彻底释放 Media3，断开连接，归还系统硬解资源！
                     state.release()
                 }
                 else -> {}
@@ -192,22 +215,11 @@ enum class VideoPlayerDisplayMode(
     val label: String,
     val value: Int,
 ) {
-    /** 原始 */
     ORIGINAL("原始", 0),
-
-    /** 填充 */
     FILL("填充", 1),
-
-    /** 裁剪 */
     CROP("裁剪", 2),
-
-    /** 4:3 */
     FOUR_THREE("4:3", 3),
-
-    /** 16:9 */
     SIXTEEN_NINE("16:9", 4),
-
-    /** 2.35:1 */
     WIDE("2.35:1", 5);
 
     companion object {
