@@ -134,6 +134,10 @@ fun rememberVideoPlayerState(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val coroutineScope = rememberCoroutineScope()
+    
+    // 关键：用于在后台释放时，临时记录当前正在播放的直播流 URL
+    var savedUrl by remember { mutableStateOf<String?>(null) }
+
     val state = remember {
         VideoPlayerState(
             Media3VideoPlayer(context, coroutineScope),
@@ -148,8 +152,33 @@ fun rememberVideoPlayerState(
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) state.play()
-            else if (event == Lifecycle.Event.ON_STOP) state.pause()
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> {
+                    // 【Power On / 回到前台】
+                    if (savedUrl != null) {
+                        // 如果有之前保存的直播流 URL，说明经历过后台销毁，在这里重新初始化、装载并自动播放
+                        state.initialize()
+                        state.prepare(savedUrl!!)
+                        state.play()
+                        savedUrl = null // 恢复后清空
+                    } else {
+                        // 首次启动，或者原本就没在播放，走原有逻辑
+                        state.play()
+                    }
+                }
+                Lifecycle.Event.ON_STOP -> {
+                    // 【Power Off 息屏 / 按 Home 键切到后台】
+                    // 1. 检查当前是否有正在播放的元数据(URL)
+                    val currentUrl = state.metadata.url
+                    if (!currentUrl.isNullOrEmpty()) {
+                        savedUrl = currentUrl // 悄悄把当前的直播地址存起来
+                    }
+
+                    // 2. 彻底释放 Media3 播放器底层实例、完全归还系统硬件解码器、彻底杀死网络下载 Loader 线程
+                    state.release() 
+                }
+                else -> {}
+            }
         }
 
         lifecycleOwner.lifecycle.addObserver(observer)
