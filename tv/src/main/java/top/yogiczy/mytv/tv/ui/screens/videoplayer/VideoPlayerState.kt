@@ -24,6 +24,10 @@ class VideoPlayerState(
     private val instance: VideoPlayer,
     private var defaultDisplayModeProvider: () -> VideoPlayerDisplayMode = { VideoPlayerDisplayMode.ORIGINAL },
 ) {
+    /** 临时在内存中记录最后一次成功准备的直播流 URL，用于前后生命周期重建恢复 */
+    var lastPreparedUrl: String? = null
+        private set
+
     /** 显示模式 */
     var displayMode by mutableStateOf(defaultDisplayModeProvider())
 
@@ -50,6 +54,7 @@ class VideoPlayerState(
 
     fun prepare(url: String) {
         error = null
+        lastPreparedUrl = url // 拦截并记录当前的播放地址
         instance.prepare(url)
     }
 
@@ -101,7 +106,6 @@ class VideoPlayerState(
         instance.onError { ex ->
             error = ex?.let { "${it.errorCodeName}(${it.errorCode})" }
                 ?.apply { onErrorListeners.forEach { it.invoke() } }
-
         }
         instance.onReady {
             onReadyListeners.forEach { it.invoke() }
@@ -135,7 +139,7 @@ fun rememberVideoPlayerState(
     val lifecycleOwner = LocalLifecycleOwner.current
     val coroutineScope = rememberCoroutineScope()
     
-    // 关键：用于在后台释放时，临时记录当前正在播放的直播流 URL
+    // 用于在后台释放时，临时记住需要恢复的直播流 URL
     var savedUrl by remember { mutableStateOf<String?>(null) }
 
     val state = remember {
@@ -154,28 +158,24 @@ fun rememberVideoPlayerState(
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_RESUME -> {
-                    // 【Power On / 回到前台】
+                    // 【Power On 唤醒 / 从后台切换回前台】
                     if (savedUrl != null) {
-                        // 如果有之前保存的直播流 URL，说明经历过后台销毁，在这里重新初始化、装载并自动播放
                         state.initialize()
                         state.prepare(savedUrl!!)
                         state.play()
-                        savedUrl = null // 恢复后清空
+                        savedUrl = null // 成功恢复后清除缓存
                     } else {
-                        // 首次启动，或者原本就没在播放，走原有逻辑
                         state.play()
                     }
                 }
                 Lifecycle.Event.ON_STOP -> {
                     // 【Power Off 息屏 / 按 Home 键切到后台】
-                    // 1. 检查当前是否有正在播放的元数据(URL)
-                    val currentUrl = state.metadata.url
-                    if (!currentUrl.isNullOrEmpty()) {
-                        savedUrl = currentUrl // 悄悄把当前的直播地址存起来
+                    // 1. 如果当前正在播放或者已经有准备好的流，将其记录到 savedUrl 中
+                    if (!state.lastPreparedUrl.isNullOrEmpty()) {
+                        savedUrl = state.lastPreparedUrl
                     }
-
-                    // 2. 彻底释放 Media3 播放器底层实例、完全归还系统硬件解码器、彻底杀死网络下载 Loader 线程
-                    state.release() 
+                    // 2. 彻底释放底层播放器、切断网络下载链接、归还系统硬件解码器
+                    state.release()
                 }
                 else -> {}
             }
