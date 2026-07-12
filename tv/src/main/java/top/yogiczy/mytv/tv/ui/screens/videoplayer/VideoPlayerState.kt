@@ -24,12 +24,8 @@ class VideoPlayerState(
     private val instance: VideoPlayer,
     private var defaultDisplayModeProvider: () -> VideoPlayerDisplayMode = { VideoPlayerDisplayMode.ORIGINAL },
 ) {
-    /** 临时在内存中记录最后一次成功准备的直播流 URL */
+    /** 核心：记录最后一次准备的播放地址，用于从后台无损恢复 */
     var lastPreparedUrl: String? = null
-        private set
-
-    /** 播放器是否已经被销毁（释放） */
-    var isReleased = false
         private set
 
     /** 显示模式 */
@@ -57,34 +53,33 @@ class VideoPlayerState(
     var metadata by mutableStateOf(VideoPlayer.Metadata())
 
     fun prepare(url: String) {
-        if (isReleased) return
         error = null
-        lastPreparedUrl = url
+        lastPreparedUrl = url // 拦截并记录当前的播放地址
         instance.prepare(url)
     }
 
     fun play() {
-        if (!isReleased) instance.play()
+        instance.play()
     }
 
     fun pause() {
-        if (!isReleased) instance.pause()
+        instance.pause()
     }
 
     fun seekTo(position: Long) {
-        if (!isReleased) instance.seekTo(position)
+        instance.seekTo(position)
     }
 
     fun stop() {
-        if (!isReleased) instance.stop()
+        instance.stop()
     }
 
     fun setVideoSurfaceView(surfaceView: SurfaceView) {
-        if (!isReleased) instance.setVideoSurfaceView(surfaceView)
+        instance.setVideoSurfaceView(surfaceView)
     }
 
     fun setVideoTextureView(textureView: TextureView) {
-        if (!isReleased) instance.setVideoTextureView(textureView)
+        instance.setVideoTextureView(textureView)
     }
 
     private val onReadyListeners = mutableListOf<() -> Unit>()
@@ -104,7 +99,6 @@ class VideoPlayerState(
     }
 
     fun initialize() {
-        if (isReleased) return
         instance.initialize()
         instance.onResolution { width, height ->
             if (width > 0 && height > 0) aspectRatio = width.toFloat() / height
@@ -131,9 +125,6 @@ class VideoPlayerState(
     }
 
     fun release() {
-        // 防止重复释放引发底层 C++ 崩溃
-        if (isReleased) return
-        isReleased = true
         onReadyListeners.clear()
         onErrorListeners.clear()
         onInterruptListeners.clear()
@@ -148,57 +139,48 @@ fun rememberVideoPlayerState(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val coroutineScope = rememberCoroutineScope()
-    
-    // 用于在后台释放时，临时记住需要恢复的直播流 URL
-    var savedUrl by remember { mutableStateOf<String?>(null) }
-    
-    // 触发重建播放器的“钥匙”。Key改变时，Compose 会自动丢弃旧 State，创建新 State
-    var playerRecreateKey by remember { mutableStateOf(0) }
 
-    // 使用 playerRecreateKey 作为 remember 的 key
-    val state = remember(playerRecreateKey) {
+    // 整个生命周期内只创建一个稳定的 state，绝对不销毁重建，杜绝闭包引用丢失和黑屏
+    val state = remember {
         VideoPlayerState(
             Media3VideoPlayer(context, coroutineScope),
             defaultDisplayModeProvider,
         )
     }
+    
+    // 用于在后台息屏时，记住需要恢复的直播流 URL
+    var savedUrl by remember { mutableStateOf<String?>(null) }
 
-    // 当 state 重新创建时，自动初始化
-    DisposableEffect(playerRecreateKey) {
+    DisposableEffect(Unit) {
         state.initialize()
-        
-        // 如果是从后台切回来（savedUrl 有值），自动装填并播放
-        if (!savedUrl.isNullOrEmpty()) {
-            state.prepare(savedUrl!!)
-            state.play()
-            savedUrl = null // 恢复后清空
-        }
-        
-        // 当组件卸载或 playerRecreateKey 变化时，释放当前实例
-        onDispose { 
-            state.release() 
-        }
+        onDispose { state.release() }
     }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_RESUME -> {
-                    // 【Power On / 回到前台】
-                    // 仅当当前播放器已经是死亡状态（被 release 过了），才增加 Key 触发“转生”
-                    // 这样可以避免 App 首次冷启动时无意义的重复创建
-                    if (state.isReleased) {
-                        playerRecreateKey++
+                    // 【Power On 唤醒 / 从后台切换回前台】
+                    if (savedUrl != null) {
+                        // 因为底层的播放器引擎还是同一个，Surface 依然牢牢绑定着，直接 prepare 就能重新出画！
+                        state.prepare(savedUrl!!)
+                        state.play()
+                        savedUrl = null 
+                    } else {
+                        state.play()
                     }
                 }
                 Lifecycle.Event.ON_STOP -> {
-                    // 【Power Off / 切到后台】
-                    // 1. 记下最后的直播地址
+                    // 【Power Off 息屏 / 按 Home 键切到后台】
                     if (!state.lastPreparedUrl.isNullOrEmpty()) {
                         savedUrl = state.lastPreparedUrl
                     }
-                    // 2. 彻底释放 Media3，断开连接，归还系统硬解资源！
-                    state.release()
+                    
+                    // 【核心修复：绝对不能调 release()，改用 stop()】
+                    // 1. stop() 会停止下载（不会偷偷跑流量）。
+                    // 2. stop() 会让引擎进入 IDLE 状态，彻底释放硬件视频解码器（YouTube 再也不会变暗）。
+                    // 3. stop() 保留了引擎外壳和 Surface 绑定，为下次秒开画面做准备。
+                    state.stop()
                 }
                 else -> {}
             }
